@@ -1,0 +1,8 @@
+venv/
+__pycache__/
+*.pyc
+.env
+.streamlit/secrets.toml
+hqh539.db
+**/hqh539.db
+usage_data.json
