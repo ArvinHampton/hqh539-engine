@@ -39,6 +39,7 @@ def get_config() -> dict[str, str]:
         "STRIPE_WEBHOOK_SECRET",
         "APP_URL",
         "HQH539_DATA_DIR",
+        "DATABASE_URL",
     )
     config: dict[str, str] = {}
     for key in keys:
