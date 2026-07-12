@@ -27,7 +27,16 @@ from database import (
     user_exists,
     verify_user,
 )
+from crypto_hqh import (
+    CryptoError,
+    is_hqh539_package,
+    pack_encrypted_file,
+    unpack_encrypted_file,
+)
 from hqh539 import hqh_539, ternary_step
+
+# Soft cap for in-browser deposits (Streamlit memory)
+MAX_DEPOSIT_BYTES = 25 * 1024 * 1024
 
 try:
     init_db()
@@ -250,13 +259,23 @@ if master:
 else:
     st.success(f"Access granted — {email}")
 
-tabs = ["Hash Computation", "Avalanche Effect", "539-Step Visualization"]
+tabs = [
+    "Hash Computation",
+    "File encrypt",
+    "File decrypt",
+    "Avalanche Effect",
+    "539-Step Visualization",
+]
 if master:
     tabs.append("Master overrides")
 
 tab_objs = st.tabs(tabs)
-tab_hash, tab_avalanche, tab_viz = tab_objs[0], tab_objs[1], tab_objs[2]
-tab_master = tab_objs[3] if master else None
+tab_hash = tab_objs[0]
+tab_enc = tab_objs[1]
+tab_dec = tab_objs[2]
+tab_avalanche = tab_objs[3]
+tab_viz = tab_objs[4]
+tab_master = tab_objs[5] if master else None
 
 with tab_hash:
     msg = st.text_area("Input Message", "The universe counts in threes.")
@@ -276,6 +295,157 @@ with tab_hash:
                     st.caption(f"Charged {cost} credit(s). Remaining: {user.get('credits', 0)}")
         else:
             st.warning(f"Need {cost} credit(s) for this payload (or an active Pro subscription).")
+
+with tab_enc:
+    st.subheader("File deposit → HQH-539 encryption")
+    st.markdown(
+        "Upload a file to encrypt. Key material is derived with **HQH-539** "
+        "(resonant KDF); payload is sealed with **ChaCha20-Poly1305**. "
+        "Download a `.hqh539enc` package you can decrypt later with the same password."
+    )
+    deposit = st.file_uploader(
+        "Deposit file",
+        type=None,
+        key="encrypt_upload",
+        help=f"Max {MAX_DEPOSIT_BYTES // (1024 * 1024)} MiB per deposit",
+    )
+    enc_password = st.text_input(
+        "Encryption password",
+        type="password",
+        key="encrypt_password",
+        help="Required to decrypt later. Store it safely — it is never stored by the server.",
+    )
+    enc_password2 = st.text_input(
+        "Confirm password",
+        type="password",
+        key="encrypt_password2",
+    )
+
+    if deposit is not None:
+        raw = deposit.getvalue()
+        cost_enc = 0 if master else credits_for_payload(raw)
+        st.caption(
+            f"Deposit: **{deposit.name}** · {len(raw):,} bytes · "
+            + (
+                "**master override (0 credits)**"
+                if master
+                else f"**{cost_enc} credit(s)** to encrypt"
+            )
+        )
+        if len(raw) > MAX_DEPOSIT_BYTES:
+            st.error(
+                f"File exceeds the {MAX_DEPOSIT_BYTES // (1024 * 1024)} MiB deposit limit."
+            )
+        elif st.button("Encrypt deposit", type="primary", key="encrypt_btn"):
+            if not enc_password:
+                st.error("Enter an encryption password.")
+            elif enc_password != enc_password2:
+                st.error("Passwords do not match.")
+            else:
+                allowed = master or deduct_credits(email, cost_enc)
+                if not allowed:
+                    st.warning(
+                        f"Need {cost_enc} credit(s) for this file "
+                        "(or an active Pro subscription)."
+                    )
+                else:
+                    try:
+                        package = pack_encrypted_file(raw, enc_password, deposit.name)
+                        out_name = f"{deposit.name}.hqh539enc"
+                        st.success(
+                            f"Encrypted {len(raw):,} bytes → {len(package):,} byte package."
+                        )
+                        st.download_button(
+                            label=f"Download {out_name}",
+                            data=package,
+                            file_name=out_name,
+                            mime="application/octet-stream",
+                            key="encrypt_download",
+                        )
+                        if not master:
+                            user = get_user(email)
+                            if user and not user.get("subscription_active"):
+                                st.caption(
+                                    f"Charged {cost_enc} credit(s). "
+                                    f"Remaining: {user.get('credits', 0)}"
+                                )
+                    except CryptoError as exc:
+                        st.error(str(exc))
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"Encryption failed: {exc}")
+
+with tab_dec:
+    st.subheader("Decrypt HQH-539 package")
+    st.markdown(
+        "Upload a `.hqh539enc` package produced by this engine and enter the "
+        "password used at encryption time."
+    )
+    sealed = st.file_uploader(
+        "Encrypted package",
+        type=None,
+        key="decrypt_upload",
+        help="Typically ends with .hqh539enc",
+    )
+    dec_password = st.text_input(
+        "Decryption password",
+        type="password",
+        key="decrypt_password",
+    )
+
+    if sealed is not None:
+        pkg = sealed.getvalue()
+        cost_dec = 0 if master else credits_for_payload(pkg)
+        st.caption(
+            f"Package: **{sealed.name}** · {len(pkg):,} bytes · "
+            + (
+                "**master override (0 credits)**"
+                if master
+                else f"**{cost_dec} credit(s)** to decrypt"
+            )
+        )
+        if not is_hqh539_package(pkg):
+            st.warning(
+                "This file does not start with the HQH-539 package magic. "
+                "Decrypt may still be attempted if the header is intact."
+            )
+        if len(pkg) > MAX_DEPOSIT_BYTES:
+            st.error(
+                f"File exceeds the {MAX_DEPOSIT_BYTES // (1024 * 1024)} MiB limit."
+            )
+        elif st.button("Decrypt package", type="primary", key="decrypt_btn"):
+            if not dec_password:
+                st.error("Enter the decryption password.")
+            else:
+                allowed = master or deduct_credits(email, cost_dec)
+                if not allowed:
+                    st.warning(
+                        f"Need {cost_dec} credit(s) for this file "
+                        "(or an active Pro subscription)."
+                    )
+                else:
+                    try:
+                        plaintext, orig_name = unpack_encrypted_file(pkg, dec_password)
+                        st.success(
+                            f"Decrypted **{orig_name}** ({len(plaintext):,} bytes)."
+                        )
+                        st.download_button(
+                            label=f"Download {orig_name}",
+                            data=plaintext,
+                            file_name=orig_name,
+                            mime="application/octet-stream",
+                            key="decrypt_download",
+                        )
+                        if not master:
+                            user = get_user(email)
+                            if user and not user.get("subscription_active"):
+                                st.caption(
+                                    f"Charged {cost_dec} credit(s). "
+                                    f"Remaining: {user.get('credits', 0)}"
+                                )
+                    except CryptoError as exc:
+                        st.error(str(exc))
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"Decryption failed: {exc}")
 
 with tab_avalanche:
     st.subheader("Avalanche Demonstration")
