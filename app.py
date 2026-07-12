@@ -6,14 +6,8 @@ st.set_page_config(
     page_icon="🔐",
 )
 
-from deposit_store import (
-    blob_meta,
-    clear_blob,
-    clear_session_deposits,
-    load_blob,
-    read_prefix,
-    save_blob,
-)
+from deposit_store import clear_session_deposits
+from encrypt_ui import render_decrypt_portal, render_encrypt_portal
 from billing import (
     CREDIT_PACKS,
     StripeCheckoutError,
@@ -30,7 +24,6 @@ from database import (
     add_credits,
     bytes_per_credit,
     create_user,
-    credits_for_nbytes,
     credits_for_payload,
     deduct_credits,
     get_user,
@@ -40,27 +33,7 @@ from database import (
     user_exists,
     verify_user,
 )
-from crypto_hqh import (
-    CryptoError,
-    is_hqh539_package,
-    pack_encrypted_file,
-    unpack_encrypted_file,
-)
 from hqh539 import hqh_539, ternary_step
-
-# Deposit size cap (bytes). Override with env HQH539_MAX_DEPOSIT_MB (default 2048 = 2 GiB).
-def _max_deposit_bytes() -> int:
-    import os
-
-    raw = (os.getenv("HQH539_MAX_DEPOSIT_MB") or "2048").strip()
-    try:
-        mb = int(raw)
-    except ValueError:
-        mb = 2048
-    return max(1, mb) * 1024 * 1024
-
-
-MAX_DEPOSIT_BYTES = _max_deposit_bytes()
 
 try:
     init_db()
@@ -337,246 +310,10 @@ with tab_hash:
             st.warning(f"Need {cost} credit(s) for this payload (or an active Pro subscription).")
 
 with tab_enc:
-    st.subheader("File deposit → HQH-539-512 encryption")
-    st.markdown(
-        "Upload a file to encrypt. Key material is derived with **Hampton Qutrit Hash (HQH-539)** "
-        "as a KDF (SHA3-512 wrap · 539 steps 18+521); payload is sealed with **ChaCha20-Poly1305**."
-    )
-    st.info(
-        "Flow: (1) choose file once → staged on disk, uploader removed. "
-        "(2) enter passwords. (3) click **Encrypt**. "
-        "File bytes are **not** kept in the browser session (that was causing the kick-out)."
-    )
-
-    # Metadata only — never load multi-MB deposits into RAM until Encrypt is pressed.
-    enc_meta = blob_meta(st.session_state, "enc_in")
-
-    if enc_meta is None:
-        deposit = st.file_uploader(
-            "1 · Choose deposit file",
-            type=None,
-            key="encrypt_upload_v3",
-            help=f"Max {MAX_DEPOSIT_BYTES // (1024 * 1024)} MiB",
-        )
-        if deposit is not None:
-            raw_up = deposit.getvalue()
-            if len(raw_up) > MAX_DEPOSIT_BYTES:
-                st.error(
-                    f"File exceeds the {MAX_DEPOSIT_BYTES // (1024 * 1024)} MiB deposit limit."
-                )
-            else:
-                save_blob(st.session_state, "enc_in", raw_up, deposit.name)
-                clear_blob(st.session_state, "enc_out")
-                st.session_state.pop("enc_package_msg", None)
-                st.session_state.pop("enc_package_toll", None)
-                # Drop the huge in-memory upload reference and remount UI without uploader.
-                del raw_up
-                st.rerun()
-        else:
-            st.caption("Choose a file to stage it for encryption.")
-    else:
-        dep_name = enc_meta.get("name") or "deposit.bin"
-        dep_size = int(enc_meta.get("size") or 0)
-        cost_enc = 0 if master else credits_for_nbytes(dep_size)
-        st.success(
-            f"Deposit staged on server: **{dep_name}** · {dep_size:,} bytes · "
-            + (
-                "master override (0 credits)"
-                if master
-                else f"{cost_enc} credit(s) to encrypt"
-            )
-        )
-        if st.button("Clear deposit / choose another file", key="enc_clear_deposit"):
-            clear_blob(st.session_state, "enc_in")
-            clear_blob(st.session_state, "enc_out")
-            st.session_state.pop("enc_package_msg", None)
-            st.session_state.pop("enc_package_toll", None)
-            st.rerun()
-
-        with st.form("encrypt_form", clear_on_submit=False):
-            st.markdown("**2 · Password** (sent only when you click Encrypt)")
-            enc_password = st.text_input(
-                "Encryption password",
-                type="password",
-                help="Never stored on the server.",
-            )
-            enc_password2 = st.text_input("Confirm password", type="password")
-            submitted = st.form_submit_button("Encrypt deposit", type="primary")
-
-            if submitted:
-                if not enc_password:
-                    st.error("Enter an encryption password.")
-                elif enc_password != enc_password2:
-                    st.error("Passwords do not match.")
-                else:
-                    allowed = master or deduct_credits(email, cost_enc)
-                    if not allowed:
-                        st.warning(
-                            f"Need {cost_enc} credit(s) for this file "
-                            "(or an active Pro subscription)."
-                        )
-                    else:
-                        try:
-                            loaded = load_blob(st.session_state, "enc_in")
-                            if not loaded:
-                                st.error("Staged deposit missing — upload the file again.")
-                            else:
-                                raw, dep_name = loaded
-                                package = pack_encrypted_file(
-                                    raw, enc_password, dep_name
-                                )
-                                out_name = f"{dep_name}.hqh539enc"
-                                save_blob(
-                                    st.session_state, "enc_out", package, out_name
-                                )
-                                st.session_state["enc_package_msg"] = (
-                                    f"Encrypted {len(raw):,} bytes → "
-                                    f"{len(package):,} byte package."
-                                )
-                                if not master:
-                                    u2 = get_user(email)
-                                    if u2 and not u2.get("subscription_active"):
-                                        st.session_state["enc_package_toll"] = (
-                                            f"Charged {cost_enc} credit(s). "
-                                            f"Remaining: {u2.get('credits', 0)}"
-                                        )
-                                # Free RAM after staging ciphertext
-                                del raw, package
-                        except CryptoError as exc:
-                            st.error(str(exc))
-                        except Exception as exc:  # noqa: BLE001
-                            st.error(f"Encryption failed: {exc}")
-
-        out_meta = blob_meta(st.session_state, "enc_out")
-        if out_meta is not None:
-            st.success(st.session_state.get("enc_package_msg", "Package ready."))
-            if st.session_state.get("enc_package_toll"):
-                st.caption(st.session_state["enc_package_toll"])
-            # Load ciphertext only for the download control
-            out = load_blob(st.session_state, "enc_out")
-            if out is not None:
-                package, out_name = out
-                st.download_button(
-                    label=f"Download {out_name}",
-                    data=package,
-                    file_name=out_name,
-                    mime="application/octet-stream",
-                    key="encrypt_download",
-                )
+    render_encrypt_portal(email, is_master=master)
 
 with tab_dec:
-    st.subheader("Decrypt HQH-539-512 package")
-    st.markdown(
-        "Upload a `.hqh539enc` package and enter the password used at encryption time."
-    )
-    st.info(
-        "Package is staged on disk (metadata only in the session). "
-        "Password form does not re-read the whole file until you click Decrypt."
-    )
-
-    dec_meta = blob_meta(st.session_state, "dec_in")
-
-    if dec_meta is None:
-        sealed = st.file_uploader(
-            "1 · Choose encrypted package",
-            type=None,
-            key="decrypt_upload_v3",
-            help="Typically ends with .hqh539enc",
-        )
-        if sealed is not None:
-            pkg_up = sealed.getvalue()
-            if len(pkg_up) > MAX_DEPOSIT_BYTES:
-                st.error(
-                    f"File exceeds the {MAX_DEPOSIT_BYTES // (1024 * 1024)} MiB limit."
-                )
-            else:
-                save_blob(st.session_state, "dec_in", pkg_up, sealed.name)
-                clear_blob(st.session_state, "dec_out")
-                st.session_state.pop("dec_toll", None)
-                del pkg_up
-                st.rerun()
-        else:
-            st.caption("Choose a package to stage it for decryption.")
-    else:
-        pkg_label = dec_meta.get("name") or "package.hqh539enc"
-        pkg_size = int(dec_meta.get("size") or 0)
-        cost_dec = 0 if master else credits_for_nbytes(pkg_size)
-        st.success(
-            f"Package staged on server: **{pkg_label}** · {pkg_size:,} bytes · "
-            + (
-                "master override (0 credits)"
-                if master
-                else f"{cost_dec} credit(s) to decrypt"
-            )
-        )
-        prefix = read_prefix(st.session_state, "dec_in", 8)
-        if prefix is not None and not is_hqh539_package(prefix):
-            st.warning(
-                "This file does not start with the HQH-539-512 package magic. "
-                "Decrypt may still be attempted if the header is intact."
-            )
-        if st.button("Clear package / choose another", key="dec_clear"):
-            clear_blob(st.session_state, "dec_in")
-            clear_blob(st.session_state, "dec_out")
-            st.session_state.pop("dec_toll", None)
-            st.rerun()
-
-        with st.form("decrypt_form", clear_on_submit=False):
-            st.markdown("**2 · Password**")
-            dec_password = st.text_input("Decryption password", type="password")
-            submitted_dec = st.form_submit_button("Decrypt package", type="primary")
-            if submitted_dec:
-                if not dec_password:
-                    st.error("Enter the decryption password.")
-                else:
-                    allowed = master or deduct_credits(email, cost_dec)
-                    if not allowed:
-                        st.warning(
-                            f"Need {cost_dec} credit(s) for this file "
-                            "(or an active Pro subscription)."
-                        )
-                    else:
-                        try:
-                            loaded = load_blob(st.session_state, "dec_in")
-                            if not loaded:
-                                st.error("Staged package missing — upload again.")
-                            else:
-                                pkg, _label = loaded
-                                plaintext, orig_name = unpack_encrypted_file(
-                                    pkg, dec_password
-                                )
-                                save_blob(
-                                    st.session_state, "dec_out", plaintext, orig_name
-                                )
-                                if not master:
-                                    u2 = get_user(email)
-                                    if u2 and not u2.get("subscription_active"):
-                                        st.session_state["dec_toll"] = (
-                                            f"Charged {cost_dec} credit(s). "
-                                            f"Remaining: {u2.get('credits', 0)}"
-                                        )
-                                del pkg, plaintext
-                        except CryptoError as exc:
-                            st.error(str(exc))
-                        except Exception as exc:  # noqa: BLE001
-                            st.error(f"Decryption failed: {exc}")
-
-        out_meta = blob_meta(st.session_state, "dec_out")
-        if out_meta is not None:
-            out_dec = load_blob(st.session_state, "dec_out")
-            if out_dec is not None:
-                pt, orig_name = out_dec
-                st.success(f"Decrypted **{orig_name}** ({len(pt):,} bytes).")
-                if st.session_state.get("dec_toll"):
-                    st.caption(st.session_state["dec_toll"])
-                st.download_button(
-                    label=f"Download {orig_name}",
-                    data=pt,
-                    file_name=orig_name,
-                    mime="application/octet-stream",
-                    key="decrypt_download",
-                )
-
+    render_decrypt_portal(email, is_master=master)
 with tab_avalanche:
     st.subheader("Avalanche Demonstration")
     col1, col2 = st.columns(2)
