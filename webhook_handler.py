@@ -1,4 +1,4 @@
-"""Stripe webhook service — deploy separately from Streamlit Cloud (Render, Railway, etc.)."""
+"""Stripe webhook service — must share DATABASE_URL with the Streamlit Hash Engine."""
 from __future__ import annotations
 
 import os
@@ -7,7 +7,8 @@ import stripe
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 
-from database import activate_subscription, add_credits, init_db
+from billing import apply_paid_checkout_session
+from database import init_db
 
 load_dotenv()
 
@@ -16,58 +17,13 @@ app = Flask(__name__)
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
 
-PRICE_TO_CREDITS = {
-    os.getenv("STRIPE_PRICE_ID_100", ""): 100,
-    os.getenv("STRIPE_PRICE_ID_500", ""): 500,
-    os.getenv("STRIPE_PRICE_ID_2000", ""): 2000,
-}
-
 init_db()
-
-
-def _resolve_email(session: dict) -> str | None:
-    metadata = session.get("metadata") or {}
-    email = metadata.get("user_email")
-    if email:
-        return email.strip().lower()
-
-    customer_details = session.get("customer_details") or {}
-    email = customer_details.get("email")
-    if email:
-        return email.strip().lower()
-
-    client_ref = session.get("client_reference_id")
-    if client_ref and "@" in client_ref:
-        return client_ref.strip().lower()
-
-    return None
-
-
-def _credits_from_session(session: dict) -> int | None:
-    metadata = session.get("metadata") or {}
-    raw = metadata.get("credits")
-    if raw:
-        try:
-            return int(raw)
-        except ValueError:
-            pass
-
-    session_id = session.get("id")
-    if not session_id:
-        return None
-
-    line_items = stripe.checkout.Session.list_line_items(session_id, limit=10)
-    for item in line_items.data:
-        price_id = item.price.id if item.price else ""
-        if price_id in PRICE_TO_CREDITS:
-            return PRICE_TO_CREDITS[price_id] * int(item.quantity or 1)
-    return None
 
 
 @app.route("/", methods=["GET"])
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"}), 200
+    return jsonify({"status": "ok", "db": bool(os.getenv("DATABASE_URL"))}), 200
 
 
 @app.route("/webhook", methods=["POST"])
@@ -87,33 +43,18 @@ def stripe_webhook():
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
-        email = _resolve_email(session)
-        if not email:
-            return jsonify({"status": "ignored - no email"}), 200
+        # Normalize to dict with payment_status paid when complete
+        if isinstance(session, dict) and session.get("status") == "complete":
+            session.setdefault("payment_status", session.get("payment_status") or "paid")
+        applied, msg = apply_paid_checkout_session(session)
+        print(f"checkout.session.completed applied={applied} msg={msg} id={session.get('id')}")
+        return jsonify({"status": "ok", "applied": applied, "detail": msg}), 200
 
-        if session.get("mode") == "subscription":
-            activate_subscription(email, days=30)
-            print(f"Subscription activated for: {email}")
+    if event["type"] == "customer.subscription.deleted":
+        print("Subscription cancelled event received")
+        return jsonify({"status": "ok"}), 200
 
-        elif session.get("mode") == "payment":
-            credits = _credits_from_session(session)
-            if credits:
-                ok = add_credits(email, credits)
-                if ok:
-                    print(f"Added {credits} credits for: {email}")
-                else:
-                    print(
-                        f"WARN: could not add {credits} credits for {email} "
-                        f"(user missing in shared DB — ensure DATABASE_URL is set "
-                        f"and the same email is registered in the Streamlit app)"
-                    )
-            else:
-                print(f"Payment completed but credits unresolved for: {email}")
-
-    elif event["type"] == "customer.subscription.deleted":
-        print("Subscription cancelled event received — extend database.py if you need auto-revoke.")
-
-    return jsonify({"status": "success"}), 200
+    return jsonify({"status": "ignored", "type": event["type"]}), 200
 
 
 if __name__ == "__main__":

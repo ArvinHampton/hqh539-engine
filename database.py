@@ -13,6 +13,10 @@ from config import data_dir, get as config_get
 
 DB_FILENAME = "hqh539.db"
 
+# Credit tolling: 1 credit per this many input bytes (rounded up), minimum 1.
+# Override with env HQH539_BYTES_PER_CREDIT (e.g. 65536 = 64 KiB per credit).
+DEFAULT_BYTES_PER_CREDIT = 64 * 1024
+
 CREATE_USERS_SQL = """
 CREATE TABLE IF NOT EXISTS users (
     email TEXT PRIMARY KEY,
@@ -20,6 +24,16 @@ CREATE TABLE IF NOT EXISTS users (
     credits INTEGER DEFAULT 0,
     subscription_active INTEGER DEFAULT 0,
     subscription_expires TEXT
+)
+"""
+
+CREATE_LEDGER_SQL = """
+CREATE TABLE IF NOT EXISTS credit_ledger (
+    session_id TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    credits INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    created_at TEXT NOT NULL
 )
 """
 
@@ -45,7 +59,12 @@ def _connect() -> Iterator[Any]:
         import psycopg2
         from psycopg2.extras import RealDictCursor
 
-        conn = psycopg2.connect(_database_url(), cursor_factory=RealDictCursor)
+        url = _database_url()
+        # Render external needs SSL; internal hostnames usually work without.
+        kwargs: dict[str, Any] = {"cursor_factory": RealDictCursor}
+        if url and "render.com" in url and "sslmode" not in url:
+            kwargs["sslmode"] = "require"
+        conn = psycopg2.connect(url, **kwargs)
         try:
             yield conn
             conn.commit()
@@ -75,49 +94,7 @@ def init_db() -> None:
     with _connect() as conn:
         c = conn.cursor()
         c.execute(_q(CREATE_USERS_SQL))
-    apply_env_credit_recovery()
-
-
-def apply_env_credit_recovery() -> None:
-    """One-shot recovery: set RECOVER_CREDITS_EMAIL / RECOVER_CREDITS_AMOUNT
-    (and RECOVER_TEMP_PASSWORD if the user row does not exist yet).
-    Remove those env vars after a successful deploy.
-    """
-    email = (os.getenv("RECOVER_CREDITS_EMAIL") or "").strip().lower()
-    if not email:
-        return
-    try:
-        amount = int(os.getenv("RECOVER_CREDITS_AMOUNT") or "0")
-    except ValueError:
-        amount = 0
-    if amount <= 0:
-        return
-
-    temp_pw = (os.getenv("RECOVER_TEMP_PASSWORD") or "").strip()
-    try:
-        user = get_user(email)
-        if not user:
-            if not temp_pw:
-                print(
-                    f"RECOVER: no user for {email!r} and RECOVER_TEMP_PASSWORD unset; skip"
-                )
-                return
-            if not create_user(email, temp_pw):
-                # race or already created
-                user = get_user(email)
-                if not user:
-                    print(f"RECOVER: failed to create user {email!r}")
-                    return
-        with _connect() as conn:
-            c = conn.cursor()
-            # Absolute set so restarts stay idempotent for this recovery
-            c.execute(
-                _q("UPDATE users SET credits = ? WHERE email = ?"),
-                (amount, email),
-            )
-        print(f"RECOVER: set credits={amount} for {email}")
-    except Exception as exc:
-        print(f"RECOVER failed for {email}: {exc}")
+        c.execute(_q(CREATE_LEDGER_SQL))
 
 
 def hash_password(password: str) -> str:
@@ -161,7 +138,9 @@ def get_user(email: str) -> dict | None:
     with _connect() as conn:
         c = conn.cursor()
         c.execute(
-            _q("SELECT credits, subscription_active, subscription_expires FROM users WHERE email = ?"),
+            _q(
+                "SELECT credits, subscription_active, subscription_expires FROM users WHERE email = ?"
+            ),
             (email,),
         )
         row = c.fetchone()
@@ -184,6 +163,28 @@ def get_user(email: str) -> dict | None:
         }
 
 
+def bytes_per_credit() -> int:
+    raw = os.getenv("HQH539_BYTES_PER_CREDIT", "").strip()
+    if raw:
+        try:
+            n = int(raw)
+            if n > 0:
+                return n
+        except ValueError:
+            pass
+    return DEFAULT_BYTES_PER_CREDIT
+
+
+def credits_for_payload(data: str | bytes) -> int:
+    """Toll: ceil(payload_bytes / BYTES_PER_CREDIT), minimum 1 credit."""
+    if isinstance(data, str):
+        n = len(data.encode("utf-8"))
+    else:
+        n = len(data)
+    unit = bytes_per_credit()
+    return max(1, (n + unit - 1) // unit)
+
+
 def add_credits(email: str, amount: int) -> bool:
     """Add credits for an existing user. Returns True if a row was updated."""
     if amount <= 0:
@@ -197,34 +198,112 @@ def add_credits(email: str, amount: int) -> bool:
         )
         updated = c.rowcount > 0
         if not updated:
-            # Webhook and Streamlit must share DATABASE_URL; user must already exist.
             print(
                 f"add_credits: no user row for {email!r} "
-                f"(credits not applied — register on the app first, or check email match)"
+                f"(register in the Hash Engine with this email first)"
             )
         return updated
 
 
-def deduct_credit(email: str) -> bool:
+def deduct_credits(email: str, amount: int) -> bool:
+    """Deduct `amount` credits (or allow free if Pro). Returns False if insufficient."""
+    if amount <= 0:
+        return True
     email = email.strip().lower()
     user = get_user(email)
     if not user:
         return False
     if user["subscription_active"]:
         return True
-    if user["credits"] <= 0:
+    if user["credits"] < amount:
         return False
 
     with _connect() as conn:
         c = conn.cursor()
         c.execute(
-            _q("UPDATE users SET credits = credits - 1 WHERE email = ? AND credits > 0"),
-            (email,),
+            _q(
+                "UPDATE users SET credits = credits - ? "
+                "WHERE email = ? AND credits >= ?"
+            ),
+            (amount, email, amount),
         )
         return c.rowcount > 0
 
 
-def activate_subscription(email: str, days: int = 30) -> None:
+def deduct_credit(email: str) -> bool:
+    """Back-compat: deduct one credit."""
+    return deduct_credits(email, 1)
+
+
+def grant_checkout_once(
+    session_id: str,
+    email: str,
+    credits: int,
+    kind: str = "credits",
+) -> tuple[bool, str]:
+    """
+    Idempotently grant credits (or mark subscription) for a Stripe checkout session.
+    Returns (applied_now, message).
+    """
+    if not session_id or not email:
+        return False, "missing session_id or email"
+    email = email.strip().lower()
+    session_id = session_id.strip()
+
+    with _connect() as conn:
+        c = conn.cursor()
+        c.execute(_q("SELECT session_id FROM credit_ledger WHERE session_id = ?"), (session_id,))
+        if c.fetchone():
+            return False, "already_applied"
+
+        # Ensure ledger insert happens first for idempotency under concurrency
+        try:
+            c.execute(
+                _q(
+                    "INSERT INTO credit_ledger (session_id, email, credits, kind, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)"
+                ),
+                (session_id, email, int(credits), kind, datetime.utcnow().isoformat()),
+            )
+        except Exception as exc:
+            if _using_postgres():
+                import psycopg2
+
+                if isinstance(exc, psycopg2.IntegrityError):
+                    return False, "already_applied"
+            elif isinstance(exc, sqlite3.IntegrityError):
+                return False, "already_applied"
+            raise
+
+        if kind == "subscription":
+            expires = (datetime.now() + timedelta(days=30)).isoformat()
+            c.execute(
+                _q(
+                    """UPDATE users
+                       SET subscription_active = 1, subscription_expires = ?
+                       WHERE email = ?"""
+                ),
+                (expires, email),
+            )
+            if c.rowcount == 0:
+                print(f"grant_checkout_once: no user for subscription {email!r}")
+                c.execute(_q("DELETE FROM credit_ledger WHERE session_id = ?"), (session_id,))
+                return False, "user_missing"
+            return True, "subscription_activated"
+
+        c.execute(
+            _q("UPDATE users SET credits = credits + ? WHERE email = ?"),
+            (int(credits), email),
+        )
+        if c.rowcount == 0:
+            print(f"grant_checkout_once: no user for credits {email!r}")
+            # Roll back ledger row so a later retry (after register) can succeed
+            c.execute(_q("DELETE FROM credit_ledger WHERE session_id = ?"), (session_id,))
+            return False, "user_missing"
+        return True, f"credited_{credits}"
+
+
+def activate_subscription(email: str, days: int = 30) -> bool:
     email = email.strip().lower()
     expires = (datetime.now() + timedelta(days=days)).isoformat()
     with _connect() as conn:
@@ -237,6 +316,7 @@ def activate_subscription(email: str, days: int = 30) -> None:
             ),
             (expires, email),
         )
+        return c.rowcount > 0
 
 
 def deactivate_subscription(email: str) -> None:
