@@ -1,6 +1,10 @@
 import streamlit as st
 
-st.set_page_config(page_title="HQH-539-512", layout="wide", page_icon="🔐")
+st.set_page_config(
+    page_title="HQH-539-512 · Hampton Qutrit Hash",
+    layout="wide",
+    page_icon="🔐",
+)
 
 from billing import (
     CREDIT_PACKS,
@@ -52,7 +56,9 @@ CHECKOUT_SUCCESS = f"{BASE_URL}/?checkout=success"
 CHECKOUT_CANCEL = f"{BASE_URL}/?checkout=cancel"
 
 st.title("HQH-539-512")
-st.caption("539 Labs LLC · Resonant Hash Engine · 512-bit digest")
+st.caption(
+    "**Hampton Qutrit Hash (HQH)** · **539 steps (18 + 521)** · wrapped in **SHA3-512** · 539 Labs LLC"
+)
 
 if _db_error:
     st.error(
@@ -65,9 +71,11 @@ if is_live_mode():
     st.warning("Live billing is enabled. Real charges will be processed.")
 
 st.info(
-    "HQH-539 is a 539-step one-way hash function with exceptionally strong avalanche properties. "
-    "Its design makes reversal computationally infeasible with known classical and quantum methods, "
-    "pending independent peer review."
+    "**Hampton Qutrit Hash (HQH)** — a **539-step** one-way primitive "
+    "(**18** variable + **521** fixed ternary/qutrit map steps), "
+    "**seeded and finalized with SHA3-512** (512-bit hex digest). "
+    "Avalanche is strong by design; reversal is computationally infeasible with known "
+    "classical and quantum methods, pending independent peer review."
 )
 
 # ==================== AUTHENTICATION ====================
@@ -210,7 +218,7 @@ with st.sidebar:
 
 # ==================== PAYWALL (skipped for master) ====================
 if not has_access:
-    st.warning("Choose how you want to access HQH-539:")
+    st.warning("Choose how you want to access HQH-539-512:")
 
     col1, col2 = st.columns(2)
 
@@ -285,10 +293,15 @@ with tab_hash:
         st.caption(f"Input size: {nbytes} bytes → **master override (0 credits)**")
     else:
         st.caption(f"Input size: {nbytes} bytes → **{cost} credit(s)** for this hash")
-    if st.button("Compute HQH-539", type="primary"):
+    st.caption(
+        "Pipeline: **SHA3-512(seed)** → **539 T3 steps (18 + 521)** → **SHA3-512(finalize)** → 128 hex chars."
+    )
+    if st.button("Compute HQH-539-512", type="primary"):
         allowed = master or deduct_credits(email, cost)
         if allowed:
-            st.code(hqh_539(msg), language="text")
+            digest = hqh_539(msg)
+            st.code(digest, language="text")
+            st.caption(f"Digest length: {len(digest)} hex chars (512-bit SHA3 wrap).")
             if not master:
                 user = get_user(email)
                 if user and not user.get("subscription_active"):
@@ -297,10 +310,10 @@ with tab_hash:
             st.warning(f"Need {cost} credit(s) for this payload (or an active Pro subscription).")
 
 with tab_enc:
-    st.subheader("File deposit → HQH-539 encryption")
+    st.subheader("File deposit → HQH-539-512 encryption")
     st.markdown(
-        "Upload a file to encrypt. Key material is derived with **HQH-539** "
-        "(resonant KDF); payload is sealed with **ChaCha20-Poly1305**. "
+        "Upload a file to encrypt. Key material is derived with **Hampton Qutrit Hash (HQH-539)** "
+        "as a KDF (SHA3-512 wrap · 539 steps 18+521); payload is sealed with **ChaCha20-Poly1305**. "
         "Download a `.hqh539enc` package you can decrypt later with the same password."
     )
     deposit = st.file_uploader(
@@ -375,10 +388,10 @@ with tab_enc:
                         st.error(f"Encryption failed: {exc}")
 
 with tab_dec:
-    st.subheader("Decrypt HQH-539 package")
+    st.subheader("Decrypt HQH-539-512 package")
     st.markdown(
         "Upload a `.hqh539enc` package produced by this engine and enter the "
-        "password used at encryption time."
+        "password used at encryption time (same HQH-539 / SHA3-512 KDF)."
     )
     sealed = st.file_uploader(
         "Encrypted package",
@@ -405,7 +418,7 @@ with tab_dec:
         )
         if not is_hqh539_package(pkg):
             st.warning(
-                "This file does not start with the HQH-539 package magic. "
+                "This file does not start with the HQH-539-512 package magic. "
                 "Decrypt may still be attempted if the header is intact."
             )
         if len(pkg) > MAX_DEPOSIT_BYTES:
@@ -475,15 +488,19 @@ with tab_avalanche:
             st.warning(f"Need {cost_av} credit(s) for this comparison.")
 
 with tab_viz:
-    st.subheader("Real-Time 539-Step Visualization")
-    st.caption("Visualization is free (no payload hash).")
-    if st.button("Run 539-Step Collapse"):
+    st.subheader("539-step T3 visualization (18 + 521 structure)")
+    st.caption(
+        "Free preview of the qutrit/ternary map trajectory (not the full SHA3-wrapped hash). "
+        "Production HQH applies **18 + 521 = 539** T3 steps between SHA3-512 seed and finalize."
+    )
+    if st.button("Run 539-step collapse"):
         sequence = []
         n = 10**12
-        for _ in range(539):
+        for i in range(539):
             sequence.append(float(n))
             n = ternary_step(n)
         st.line_chart(sequence)
+        st.caption("Steps 1–18: variable prefix · Steps 19–539: fixed 521-step suffix.")
 
 if tab_master is not None:
     with tab_master:
@@ -546,4 +563,6 @@ if tab_master is not None:
         except Exception as exc:  # noqa: BLE001
             st.error(f"Could not list users: {exc}")
 
-st.caption("539 Labs LLC • HQH-539-512")
+st.caption(
+    "539 Labs LLC · Hampton Qutrit Hash (HQH) · 539 steps (18–521) · SHA3-512 wrap · HQH-539-512"
+)

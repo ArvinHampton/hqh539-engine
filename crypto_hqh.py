@@ -1,8 +1,8 @@
 """
-HQH-539 keyed encryption for file deposits.
+HQH-539-512 keyed encryption for file deposits.
 
-Key material is derived with the HQH-539 resonant hash (KDF), then used with
-ChaCha20-Poly1305 for authenticated encryption.
+Key material is derived with Hampton Qutrit Hash (HQH): SHA3-512 wrap around
+539 T3 steps (18+521), used as a KDF, then ChaCha20-Poly1305 AEAD.
 """
 from __future__ import annotations
 
