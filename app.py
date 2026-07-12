@@ -80,6 +80,12 @@ st.info(
 
 # ==================== AUTHENTICATION ====================
 if not st.session_state.email:
+    st.warning(
+        "You are signed out. If you were mid-encrypt, the session likely expired after a "
+        "full page reload (common when a large file was re-sent on every keystroke). "
+        "Log in again, then use the **password form** on File encrypt so the file is only "
+        "processed when you click Encrypt."
+    )
     tab_login, tab_register, tab_reset = st.tabs(["Login", "Register", "Reset password"])
 
     with tab_login:
@@ -316,76 +322,108 @@ with tab_enc:
         "as a KDF (SHA3-512 wrap · 539 steps 18+521); payload is sealed with **ChaCha20-Poly1305**. "
         "Download a `.hqh539enc` package you can decrypt later with the same password."
     )
+    st.info(
+        "**How to avoid timeouts:** (1) Choose the file once — it is cached in this session. "
+        "(2) Type both passwords **inside the form**. (3) Click **Encrypt deposit** once. "
+        "Do not press Enter between password fields (that used to re-upload the whole file and drop your login)."
+    )
+
     deposit = st.file_uploader(
-        "Deposit file",
+        "1 · Choose deposit file",
         type=None,
         key="encrypt_upload",
         help=f"Max {MAX_DEPOSIT_BYTES // (1024 * 1024)} MiB per deposit",
     )
-    enc_password = st.text_input(
-        "Encryption password",
-        type="password",
-        key="encrypt_password",
-        help="Required to decrypt later. Store it safely — it is never stored by the server.",
-    )
-    enc_password2 = st.text_input(
-        "Confirm password",
-        type="password",
-        key="encrypt_password2",
-    )
-
+    # Cache bytes server-side so later form submit does not depend on re-reading the widget alone.
     if deposit is not None:
-        raw = deposit.getvalue()
-        cost_enc = 0 if master else credits_for_payload(raw)
-        st.caption(
-            f"Deposit: **{deposit.name}** · {len(raw):,} bytes · "
-            + (
-                "**master override (0 credits)**"
-                if master
-                else f"**{cost_enc} credit(s)** to encrypt"
-            )
-        )
-        if len(raw) > MAX_DEPOSIT_BYTES:
+        raw_up = deposit.getvalue()
+        if len(raw_up) > MAX_DEPOSIT_BYTES:
             st.error(
                 f"File exceeds the {MAX_DEPOSIT_BYTES // (1024 * 1024)} MiB deposit limit."
             )
-        elif st.button("Encrypt deposit", type="primary", key="encrypt_btn"):
-            if not enc_password:
-                st.error("Enter an encryption password.")
-            elif enc_password != enc_password2:
-                st.error("Passwords do not match.")
-            else:
-                allowed = master or deduct_credits(email, cost_enc)
-                if not allowed:
-                    st.warning(
-                        f"Need {cost_enc} credit(s) for this file "
-                        "(or an active Pro subscription)."
-                    )
+        else:
+            st.session_state["enc_deposit_bytes"] = raw_up
+            st.session_state["enc_deposit_name"] = deposit.name
+
+    raw = st.session_state.get("enc_deposit_bytes")
+    dep_name = st.session_state.get("enc_deposit_name")
+
+    if raw and dep_name:
+        cost_enc = 0 if master else credits_for_payload(raw)
+        st.success(
+            f"Deposit ready: **{dep_name}** · {len(raw):,} bytes · "
+            + (
+                "master override (0 credits)"
+                if master
+                else f"{cost_enc} credit(s) to encrypt"
+            )
+        )
+        if st.button("Clear deposit", key="enc_clear_deposit"):
+            for k in (
+                "enc_deposit_bytes",
+                "enc_deposit_name",
+                "enc_package",
+                "enc_package_name",
+            ):
+                st.session_state.pop(k, None)
+            st.rerun()
+
+        with st.form("encrypt_form", clear_on_submit=False):
+            st.markdown("**2 · Password (submitted only when you click Encrypt)**")
+            enc_password = st.text_input(
+                "Encryption password",
+                type="password",
+                help="Never stored on the server. Required to decrypt later.",
+            )
+            enc_password2 = st.text_input("Confirm password", type="password")
+            submitted = st.form_submit_button("Encrypt deposit", type="primary")
+
+            if submitted:
+                if not enc_password:
+                    st.error("Enter an encryption password.")
+                elif enc_password != enc_password2:
+                    st.error("Passwords do not match.")
                 else:
-                    try:
-                        package = pack_encrypted_file(raw, enc_password, deposit.name)
-                        out_name = f"{deposit.name}.hqh539enc"
-                        st.success(
-                            f"Encrypted {len(raw):,} bytes → {len(package):,} byte package."
+                    allowed = master or deduct_credits(email, cost_enc)
+                    if not allowed:
+                        st.warning(
+                            f"Need {cost_enc} credit(s) for this file "
+                            "(or an active Pro subscription)."
                         )
-                        st.download_button(
-                            label=f"Download {out_name}",
-                            data=package,
-                            file_name=out_name,
-                            mime="application/octet-stream",
-                            key="encrypt_download",
-                        )
-                        if not master:
-                            user = get_user(email)
-                            if user and not user.get("subscription_active"):
-                                st.caption(
-                                    f"Charged {cost_enc} credit(s). "
-                                    f"Remaining: {user.get('credits', 0)}"
-                                )
-                    except CryptoError as exc:
-                        st.error(str(exc))
-                    except Exception as exc:  # noqa: BLE001
-                        st.error(f"Encryption failed: {exc}")
+                    else:
+                        try:
+                            package = pack_encrypted_file(raw, enc_password, dep_name)
+                            out_name = f"{dep_name}.hqh539enc"
+                            st.session_state["enc_package"] = package
+                            st.session_state["enc_package_name"] = out_name
+                            st.session_state["enc_package_msg"] = (
+                                f"Encrypted {len(raw):,} bytes → {len(package):,} byte package."
+                            )
+                            if not master:
+                                u2 = get_user(email)
+                                if u2 and not u2.get("subscription_active"):
+                                    st.session_state["enc_package_toll"] = (
+                                        f"Charged {cost_enc} credit(s). "
+                                        f"Remaining: {u2.get('credits', 0)}"
+                                    )
+                        except CryptoError as exc:
+                            st.error(str(exc))
+                        except Exception as exc:  # noqa: BLE001
+                            st.error(f"Encryption failed: {exc}")
+
+        if st.session_state.get("enc_package"):
+            st.success(st.session_state.get("enc_package_msg", "Package ready."))
+            if st.session_state.get("enc_package_toll"):
+                st.caption(st.session_state["enc_package_toll"])
+            st.download_button(
+                label=f"Download {st.session_state['enc_package_name']}",
+                data=st.session_state["enc_package"],
+                file_name=st.session_state["enc_package_name"],
+                mime="application/octet-stream",
+                key="encrypt_download",
+            )
+    else:
+        st.caption("Upload a file above to unlock the password form.")
 
 with tab_dec:
     st.subheader("Decrypt HQH-539-512 package")
@@ -393,27 +431,38 @@ with tab_dec:
         "Upload a `.hqh539enc` package produced by this engine and enter the "
         "password used at encryption time (same HQH-539 / SHA3-512 KDF)."
     )
+    st.info(
+        "Use the form below and click **Decrypt package** once so the session does not "
+        "reload between password keystrokes."
+    )
+
     sealed = st.file_uploader(
-        "Encrypted package",
+        "1 · Choose encrypted package",
         type=None,
         key="decrypt_upload",
         help="Typically ends with .hqh539enc",
     )
-    dec_password = st.text_input(
-        "Decryption password",
-        type="password",
-        key="decrypt_password",
-    )
-
     if sealed is not None:
-        pkg = sealed.getvalue()
+        pkg_up = sealed.getvalue()
+        if len(pkg_up) > MAX_DEPOSIT_BYTES:
+            st.error(
+                f"File exceeds the {MAX_DEPOSIT_BYTES // (1024 * 1024)} MiB limit."
+            )
+        else:
+            st.session_state["dec_package_bytes"] = pkg_up
+            st.session_state["dec_package_label"] = sealed.name
+
+    pkg = st.session_state.get("dec_package_bytes")
+    pkg_label = st.session_state.get("dec_package_label")
+
+    if pkg and pkg_label:
         cost_dec = 0 if master else credits_for_payload(pkg)
-        st.caption(
-            f"Package: **{sealed.name}** · {len(pkg):,} bytes · "
+        st.success(
+            f"Package ready: **{pkg_label}** · {len(pkg):,} bytes · "
             + (
-                "**master override (0 credits)**"
+                "master override (0 credits)"
                 if master
-                else f"**{cost_dec} credit(s)** to decrypt"
+                else f"{cost_dec} credit(s) to decrypt"
             )
         )
         if not is_hqh539_package(pkg):
@@ -421,44 +470,64 @@ with tab_dec:
                 "This file does not start with the HQH-539-512 package magic. "
                 "Decrypt may still be attempted if the header is intact."
             )
-        if len(pkg) > MAX_DEPOSIT_BYTES:
-            st.error(
-                f"File exceeds the {MAX_DEPOSIT_BYTES // (1024 * 1024)} MiB limit."
-            )
-        elif st.button("Decrypt package", type="primary", key="decrypt_btn"):
-            if not dec_password:
-                st.error("Enter the decryption password.")
-            else:
-                allowed = master or deduct_credits(email, cost_dec)
-                if not allowed:
-                    st.warning(
-                        f"Need {cost_dec} credit(s) for this file "
-                        "(or an active Pro subscription)."
-                    )
+        if st.button("Clear package", key="dec_clear"):
+            for k in (
+                "dec_package_bytes",
+                "dec_package_label",
+                "dec_plaintext",
+                "dec_orig_name",
+            ):
+                st.session_state.pop(k, None)
+            st.rerun()
+
+        with st.form("decrypt_form", clear_on_submit=False):
+            st.markdown("**2 · Password**")
+            dec_password = st.text_input("Decryption password", type="password")
+            submitted_dec = st.form_submit_button("Decrypt package", type="primary")
+            if submitted_dec:
+                if not dec_password:
+                    st.error("Enter the decryption password.")
                 else:
-                    try:
-                        plaintext, orig_name = unpack_encrypted_file(pkg, dec_password)
-                        st.success(
-                            f"Decrypted **{orig_name}** ({len(plaintext):,} bytes)."
+                    allowed = master or deduct_credits(email, cost_dec)
+                    if not allowed:
+                        st.warning(
+                            f"Need {cost_dec} credit(s) for this file "
+                            "(or an active Pro subscription)."
                         )
-                        st.download_button(
-                            label=f"Download {orig_name}",
-                            data=plaintext,
-                            file_name=orig_name,
-                            mime="application/octet-stream",
-                            key="decrypt_download",
-                        )
-                        if not master:
-                            user = get_user(email)
-                            if user and not user.get("subscription_active"):
-                                st.caption(
-                                    f"Charged {cost_dec} credit(s). "
-                                    f"Remaining: {user.get('credits', 0)}"
-                                )
-                    except CryptoError as exc:
-                        st.error(str(exc))
-                    except Exception as exc:  # noqa: BLE001
-                        st.error(f"Decryption failed: {exc}")
+                    else:
+                        try:
+                            plaintext, orig_name = unpack_encrypted_file(
+                                pkg, dec_password
+                            )
+                            st.session_state["dec_plaintext"] = plaintext
+                            st.session_state["dec_orig_name"] = orig_name
+                            if not master:
+                                u2 = get_user(email)
+                                if u2 and not u2.get("subscription_active"):
+                                    st.session_state["dec_toll"] = (
+                                        f"Charged {cost_dec} credit(s). "
+                                        f"Remaining: {u2.get('credits', 0)}"
+                                    )
+                        except CryptoError as exc:
+                            st.error(str(exc))
+                        except Exception as exc:  # noqa: BLE001
+                            st.error(f"Decryption failed: {exc}")
+
+        if st.session_state.get("dec_plaintext") is not None:
+            orig_name = st.session_state.get("dec_orig_name") or "recovered.bin"
+            pt = st.session_state["dec_plaintext"]
+            st.success(f"Decrypted **{orig_name}** ({len(pt):,} bytes).")
+            if st.session_state.get("dec_toll"):
+                st.caption(st.session_state["dec_toll"])
+            st.download_button(
+                label=f"Download {orig_name}",
+                data=pt,
+                file_name=orig_name,
+                mime="application/octet-stream",
+                key="decrypt_download",
+            )
+    else:
+        st.caption("Upload a package above to unlock the password form.")
 
 with tab_avalanche:
     st.subheader("Avalanche Demonstration")

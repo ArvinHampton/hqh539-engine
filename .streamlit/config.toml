@@ -5,6 +5,8 @@ enableXsrfProtection = false
 address = "0.0.0.0"
 # Render sets PORT; Streamlit CLI still wins when --server.port is passed.
 maxUploadSize = 25
+# Larger websocket frames so file deposits + UI state don't trip proxy timeouts.
+maxMessageSize = 50
 
 [browser]
 gatherUsageStats = false
