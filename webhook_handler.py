@@ -64,6 +64,7 @@ def _credits_from_session(session: dict) -> int | None:
     return None
 
 
+@app.route("/", methods=["GET"])
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"}), 200

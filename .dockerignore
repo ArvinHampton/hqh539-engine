@@ -1,0 +1,15 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.env
+.streamlit/secrets.toml
+hqh539.db
+**/hqh539.db
+usage_data.json
+*.md
+scripts/
+test_*.py
+goal_plan.md

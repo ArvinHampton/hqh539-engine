@@ -1,0 +1,49 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: hqh539-engine
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /
+    envVars:
+      - key: APP_URL
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PRICE_ID_PRO
+        sync: false
+      - key: STRIPE_PRICE_ID_100
+        sync: false
+      - key: STRIPE_PRICE_ID_500
+        sync: false
+      - key: STRIPE_PRICE_ID_2000
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: HQH539_DATA_DIR
+        value: /tmp
+
+  - type: web
+    name: hqh539-webhook
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile.webhook
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_ID_100
+        sync: false
+      - key: STRIPE_PRICE_ID_500
+        sync: false
+      - key: STRIPE_PRICE_ID_2000
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: HQH539_DATA_DIR
+        value: /tmp
