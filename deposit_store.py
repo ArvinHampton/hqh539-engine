@@ -54,7 +54,8 @@ def save_blob(session_state, kind: str, data: bytes, name: str) -> dict:
     return meta
 
 
-def load_blob(session_state, kind: str) -> tuple[bytes, str] | None:
+def blob_meta(session_state, kind: str) -> dict | None:
+    """Return staged file metadata without reading bytes into memory."""
     meta = session_state.get(f"blob_meta_{kind}")
     if not meta:
         return None
@@ -62,7 +63,30 @@ def load_blob(session_state, kind: str) -> tuple[bytes, str] | None:
     if not path.is_file():
         session_state.pop(f"blob_meta_{kind}", None)
         return None
+    # Refresh size from disk if missing
+    if "size" not in meta:
+        meta = {**meta, "size": path.stat().st_size}
+        session_state[f"blob_meta_{kind}"] = meta
+    return meta
+
+
+def load_blob(session_state, kind: str) -> tuple[bytes, str] | None:
+    """Read full blob from disk. Call only on encrypt/decrypt submit or download."""
+    meta = blob_meta(session_state, kind)
+    if not meta:
+        return None
+    path = Path(meta["path"])
     return path.read_bytes(), meta.get("name") or "file.bin"
+
+
+def read_prefix(session_state, kind: str, n: int = 16) -> bytes | None:
+    """Read only the first n bytes (magic checks) without loading the whole file."""
+    meta = blob_meta(session_state, kind)
+    if not meta:
+        return None
+    path = Path(meta["path"])
+    with path.open("rb") as f:
+        return f.read(n)
 
 
 def clear_blob(session_state, kind: str) -> None:

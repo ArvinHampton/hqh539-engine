@@ -254,14 +254,21 @@ def bytes_per_credit() -> int:
     return DEFAULT_BYTES_PER_CREDIT
 
 
+def credits_for_nbytes(n: int) -> int:
+    """Toll from size alone (no need to load the payload)."""
+    if n < 0:
+        n = 0
+    unit = bytes_per_credit()
+    return max(1, (n + unit - 1) // unit)
+
+
 def credits_for_payload(data: str | bytes) -> int:
     """Toll: ceil(payload_bytes / BYTES_PER_CREDIT), minimum 1 credit."""
     if isinstance(data, str):
         n = len(data.encode("utf-8"))
     else:
         n = len(data)
-    unit = bytes_per_credit()
-    return max(1, (n + unit - 1) // unit)
+    return credits_for_nbytes(n)
 
 
 def add_credits(email: str, amount: int) -> bool:
