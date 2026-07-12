@@ -13,8 +13,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py billing.py config.py database.py hqh539.py crypto_hqh.py \
-     deposit_store.py encrypt_ui.py locate.py usage_tracker.py webhook_handler.py \
-     golden_vectors.json ./
+     deposit_store.py encrypt_ui.py file_tokens.py locate.py usage_tracker.py \
+     webhook_handler.py golden_vectors.json ./
 COPY .streamlit .streamlit
 
 EXPOSE 8080
