@@ -61,7 +61,10 @@ def _connect() -> Iterator[Any]:
 
         url = _database_url()
         # Render external needs SSL; internal hostnames usually work without.
-        kwargs: dict[str, Any] = {"cursor_factory": RealDictCursor}
+        kwargs: dict[str, Any] = {
+            "cursor_factory": RealDictCursor,
+            "connect_timeout": 10,
+        }
         if url and "render.com" in url and "sslmode" not in url:
             kwargs["sslmode"] = "require"
         conn = psycopg2.connect(url, **kwargs)

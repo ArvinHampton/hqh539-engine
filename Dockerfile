@@ -15,8 +15,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py billing.py config.py database.py hqh539.py crypto_hqh.py \
      locate.py usage_tracker.py webhook_handler.py \
      golden_vectors.json ./
+COPY .streamlit .streamlit
 
 EXPOSE 8080
 
-# Render injects PORT; default 8080 for local `docker run -p 8080:8080`
-CMD ["sh", "-c", "streamlit run app.py --server.port=${PORT:-8080} --server.address=0.0.0.0 --server.headless=true"]
+# Render injects PORT (often 10000). Bind 0.0.0.0 so the proxy can reach Streamlit.
+CMD ["sh", "-c", "exec streamlit run app.py --server.port=${PORT:-8080} --server.address=0.0.0.0 --server.headless=true --browser.gatherUsageStats=false"]

@@ -1,0 +1,13 @@
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = false
+address = "0.0.0.0"
+# Render sets PORT; Streamlit CLI still wins when --server.port is passed.
+maxUploadSize = 25
+
+[browser]
+gatherUsageStats = false
+
+[runner]
+fastReruns = true
