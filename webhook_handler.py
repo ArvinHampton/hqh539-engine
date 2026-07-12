@@ -1,4 +1,4 @@
-"""Stripe webhook service — must share DATABASE_URL with the Streamlit Hash Engine."""
+"""Stripe webhook + HTTP file encrypt/decrypt service for HQH-539-512."""
 from __future__ import annotations
 
 import os
@@ -9,6 +9,7 @@ from flask import Flask, jsonify, request
 
 from billing import apply_paid_checkout_session
 from database import init_db
+from file_service import register_file_routes
 
 load_dotenv()
 
@@ -17,13 +18,25 @@ app = Flask(__name__)
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
 
-init_db()
+# Ensure DB tables exist (shared Postgres with Streamlit app)
+try:
+    init_db()
+except Exception as exc:  # noqa: BLE001
+    print(f"init_db warning: {exc}")
+
+register_file_routes(app)
 
 
 @app.route("/", methods=["GET"])
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "db": bool(os.getenv("DATABASE_URL"))}), 200
+    return jsonify(
+        {
+            "status": "ok",
+            "db": bool(os.getenv("DATABASE_URL")),
+            "file_api": True,
+        }
+    ), 200
 
 
 @app.route("/webhook", methods=["POST"])
@@ -43,7 +56,6 @@ def stripe_webhook():
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
-        # Normalize to dict with payment_status paid when complete
         if isinstance(session, dict) and session.get("status") == "complete":
             session.setdefault("payment_status", session.get("payment_status") or "paid")
         applied, msg = apply_paid_checkout_session(session)
@@ -59,5 +71,5 @@ def stripe_webhook():
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5001"))
-    print(f"Webhook handler running on http://0.0.0.0:{port}/webhook")
+    print(f"Service on http://0.0.0.0:{port} (webhook + /file/encrypt + /file/decrypt)")
     app.run(host="0.0.0.0", port=port, debug=False)
