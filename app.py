@@ -1,6 +1,6 @@
 import streamlit as st
 
-st.set_page_config(page_title="HQH-539 Resonant Hash Engine", layout="wide", page_icon="🔐")
+st.set_page_config(page_title="HQH-539-512", layout="wide", page_icon="🔐")
 
 from billing import (
     CREDIT_PACKS,
@@ -51,8 +51,8 @@ BASE_URL = app_base_url()
 CHECKOUT_SUCCESS = f"{BASE_URL}/?checkout=success"
 CHECKOUT_CANCEL = f"{BASE_URL}/?checkout=cancel"
 
-st.title("HQH-539 • Resonant Hash Engine")
-st.caption("539 Labs LLC")
+st.title("HQH-539-512")
+st.caption("539 Labs LLC · Resonant Hash Engine · 512-bit digest")
 
 if _db_error:
     st.error(
@@ -546,4 +546,4 @@ if tab_master is not None:
         except Exception as exc:  # noqa: BLE001
             st.error(f"Could not list users: {exc}")
 
-st.caption("539 Labs LLC • HQH-539 Resonant Hash Engine")
+st.caption("539 Labs LLC • HQH-539-512")

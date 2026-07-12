@@ -1,7 +1,7 @@
 # Render Blueprint — https://render.com/docs/blueprint-spec
 services:
   - type: web
-    name: hqh539-engine
+    name: HQH-539-512
     runtime: docker
     plan: starter
     dockerfilePath: ./Dockerfile
@@ -24,9 +24,13 @@ services:
         sync: false
       - key: HQH539_DATA_DIR
         value: /tmp
+      - key: MASTER_EMAILS
+        value: bradley20136@gmail.com
+      - key: HQH539_BYTES_PER_CREDIT
+        value: "65536"
 
   - type: web
-    name: hqh539-webhook
+    name: HQH-539-512-webhook
     runtime: docker
     plan: starter
     dockerfilePath: ./Dockerfile.webhook
