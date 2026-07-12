@@ -45,8 +45,19 @@ from crypto_hqh import (
 )
 from hqh539 import hqh_539, ternary_step
 
-# Soft cap for browser uploads (also keep session state free of multi-MB blobs)
-MAX_DEPOSIT_BYTES = 25 * 1024 * 1024
+# Deposit size cap (bytes). Override with env HQH539_MAX_DEPOSIT_MB (default 2048 = 2 GiB).
+def _max_deposit_bytes() -> int:
+    import os
+
+    raw = (os.getenv("HQH539_MAX_DEPOSIT_MB") or "2048").strip()
+    try:
+        mb = int(raw)
+    except ValueError:
+        mb = 2048
+    return max(1, mb) * 1024 * 1024
+
+
+MAX_DEPOSIT_BYTES = _max_deposit_bytes()
 
 try:
     init_db()
@@ -342,13 +353,14 @@ with tab_enc:
             "1 · Choose deposit file",
             type=None,
             key="encrypt_upload_v2",
-            help=f"Max {MAX_DEPOSIT_BYTES // (1024 * 1024)} MiB",
+            help=f"Max {MAX_DEPOSIT_BYTES // (1024 * 1024)} MiB ({MAX_DEPOSIT_BYTES // (1024 * 1024 * 1024)} GiB)",
         )
         if deposit is not None:
             raw_up = deposit.getvalue()
             if len(raw_up) > MAX_DEPOSIT_BYTES:
                 st.error(
-                    f"File exceeds the {MAX_DEPOSIT_BYTES // (1024 * 1024)} MiB deposit limit."
+                    f"File exceeds the {MAX_DEPOSIT_BYTES // (1024 * 1024)} MiB "
+                    f"({MAX_DEPOSIT_BYTES / (1024 ** 3):.1f} GiB) deposit limit."
                 )
             else:
                 save_blob(st.session_state, "enc_in", raw_up, deposit.name)

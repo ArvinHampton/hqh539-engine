@@ -4,9 +4,10 @@ enableCORS = false
 enableXsrfProtection = false
 address = "0.0.0.0"
 # Render sets PORT; Streamlit CLI still wins when --server.port is passed.
-maxUploadSize = 25
-# Larger websocket frames so file deposits + UI state don't trip proxy timeouts.
-maxMessageSize = 50
+# Must stay in sync with HQH539_MAX_DEPOSIT_MB (default 2 GiB).
+maxUploadSize = 2048
+# Large enough for status messages; file bodies use multipart upload, not this alone.
+maxMessageSize = 500
 
 [browser]
 gatherUsageStats = false
