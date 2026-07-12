@@ -75,6 +75,49 @@ def init_db() -> None:
     with _connect() as conn:
         c = conn.cursor()
         c.execute(_q(CREATE_USERS_SQL))
+    apply_env_credit_recovery()
+
+
+def apply_env_credit_recovery() -> None:
+    """One-shot recovery: set RECOVER_CREDITS_EMAIL / RECOVER_CREDITS_AMOUNT
+    (and RECOVER_TEMP_PASSWORD if the user row does not exist yet).
+    Remove those env vars after a successful deploy.
+    """
+    email = (os.getenv("RECOVER_CREDITS_EMAIL") or "").strip().lower()
+    if not email:
+        return
+    try:
+        amount = int(os.getenv("RECOVER_CREDITS_AMOUNT") or "0")
+    except ValueError:
+        amount = 0
+    if amount <= 0:
+        return
+
+    temp_pw = (os.getenv("RECOVER_TEMP_PASSWORD") or "").strip()
+    try:
+        user = get_user(email)
+        if not user:
+            if not temp_pw:
+                print(
+                    f"RECOVER: no user for {email!r} and RECOVER_TEMP_PASSWORD unset; skip"
+                )
+                return
+            if not create_user(email, temp_pw):
+                # race or already created
+                user = get_user(email)
+                if not user:
+                    print(f"RECOVER: failed to create user {email!r}")
+                    return
+        with _connect() as conn:
+            c = conn.cursor()
+            # Absolute set so restarts stay idempotent for this recovery
+            c.execute(
+                _q("UPDATE users SET credits = ? WHERE email = ?"),
+                (amount, email),
+            )
+        print(f"RECOVER: set credits={amount} for {email}")
+    except Exception as exc:
+        print(f"RECOVER failed for {email}: {exc}")
 
 
 def hash_password(password: str) -> str:
