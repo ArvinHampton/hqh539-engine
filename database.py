@@ -95,6 +95,50 @@ def init_db() -> None:
         c = conn.cursor()
         c.execute(_q(CREATE_USERS_SQL))
         c.execute(_q(CREATE_LEDGER_SQL))
+    # One-shot: CLEAR_ACCOUNT_EMAIL=user@example.com deletes that row so they can re-register.
+    # Remove the env var after deploy (does not grant credits or set passwords).
+    clear_email = (os.getenv("CLEAR_ACCOUNT_EMAIL") or "").strip().lower()
+    if clear_email:
+        if delete_user(clear_email):
+            print(f"CLEAR_ACCOUNT_EMAIL: deleted user {clear_email!r}")
+        else:
+            print(f"CLEAR_ACCOUNT_EMAIL: no user row for {clear_email!r}")
+
+
+def user_exists(email: str) -> bool:
+    email = email.strip().lower()
+    if not email:
+        return False
+    with _connect() as conn:
+        c = conn.cursor()
+        c.execute(_q("SELECT 1 FROM users WHERE email = ?"), (email,))
+        return c.fetchone() is not None
+
+
+def delete_user(email: str) -> bool:
+    """Remove a user row (and their ledger rows). Returns True if a user was deleted."""
+    email = email.strip().lower()
+    if not email:
+        return False
+    with _connect() as conn:
+        c = conn.cursor()
+        c.execute(_q("DELETE FROM credit_ledger WHERE email = ?"), (email,))
+        c.execute(_q("DELETE FROM users WHERE email = ?"), (email,))
+        return c.rowcount > 0
+
+
+def set_password(email: str, password: str) -> bool:
+    """Update password for an existing user. Returns False if user missing."""
+    email = email.strip().lower()
+    if not email or not password:
+        return False
+    with _connect() as conn:
+        c = conn.cursor()
+        c.execute(
+            _q("UPDATE users SET password_hash = ? WHERE email = ?"),
+            (hash_password(password), email),
+        )
+        return c.rowcount > 0
 
 
 def hash_password(password: str) -> str:

@@ -1,5 +1,7 @@
 import streamlit as st
 
+st.set_page_config(page_title="HQH-539 Resonant Hash Engine", layout="wide", page_icon="🔐")
+
 from billing import (
     CREDIT_PACKS,
     StripeCheckoutError,
@@ -18,24 +20,35 @@ from database import (
     deduct_credits,
     get_user,
     init_db,
+    set_password,
+    user_exists,
     verify_user,
 )
 from hqh539 import hqh_539, ternary_step
 
-init_db()
-
-st.set_page_config(page_title="HQH-539 Resonant Hash Engine", layout="wide", page_icon="🔐")
+# Database must come after set_page_config; surface errors instead of a blank crash.
+try:
+    init_db()
+    _db_error = None
+except Exception as exc:  # noqa: BLE001 — show any DB failure in UI
+    _db_error = str(exc)
 
 if "email" not in st.session_state:
     st.session_state.email = None
 
 BASE_URL = app_base_url()
-# Stripe fills {CHECKOUT_SESSION_ID}; billing appends session_id= if missing
 CHECKOUT_SUCCESS = f"{BASE_URL}/?checkout=success"
 CHECKOUT_CANCEL = f"{BASE_URL}/?checkout=cancel"
 
 st.title("HQH-539 • Resonant Hash Engine")
 st.caption("539 Labs LLC")
+
+if _db_error:
+    st.error(
+        "Database is unavailable — login and registration cannot run until this is fixed.\n\n"
+        f"`{_db_error}`"
+    )
+    st.stop()
 
 if is_live_mode():
     st.warning("Live billing is enabled. Real charges will be processed.")
@@ -48,30 +61,85 @@ st.info(
 
 # ==================== AUTHENTICATION ====================
 if not st.session_state.email:
-    tab_login, tab_register = st.tabs(["Login", "Register"])
+    tab_login, tab_register, tab_reset = st.tabs(["Login", "Register", "Reset password"])
+
     with tab_login:
         email = st.text_input("Email", key="login_email")
         password = st.text_input("Password", type="password", key="login_password")
-        if st.button("Login", type="primary"):
-            if verify_user(email, password):
-                st.session_state.email = email.strip().lower()
-                st.rerun()
+        if st.button("Login", type="primary", key="login_btn"):
+            em = (email or "").strip().lower()
+            if not em or not password:
+                st.error("Enter both email and password.")
             else:
-                st.error("Invalid credentials")
+                try:
+                    if verify_user(em, password):
+                        st.session_state.email = em
+                        st.rerun()
+                    elif user_exists(em):
+                        st.error(
+                            "Wrong password for this email. "
+                            "Use the **Reset password** tab to set a new one, then log in."
+                        )
+                    else:
+                        st.error("No account for that email. Use **Register** first.")
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Login failed (database error): {exc}")
+
     with tab_register:
         new_email = st.text_input("New Email", key="register_email")
         new_password = st.text_input("New Password", type="password", key="register_password")
-        if st.button("Create Account"):
-            if create_user(new_email, new_password):
-                st.success("Account created. Please log in.")
+        if st.button("Create Account", key="register_btn"):
+            em = (new_email or "").strip().lower()
+            if not em or "@" not in em:
+                st.error("Enter a valid email.")
+            elif not new_password or len(new_password) < 6:
+                st.error("Password must be at least 6 characters.")
             else:
-                st.error("Email already exists — log in with that email.")
+                try:
+                    if create_user(em, new_password):
+                        st.success("Account created. Switch to **Login** and sign in.")
+                    elif user_exists(em):
+                        st.error(
+                            "That email is already registered. "
+                            "Log in, or use **Reset password** if you forgot it."
+                        )
+                    else:
+                        st.error("Could not create account. Try again.")
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Registration failed (database error): {exc}")
+
+    with tab_reset:
+        st.caption(
+            "Sets a new password for an existing account. "
+            "Use this if registration says the email already exists."
+        )
+        reset_email = st.text_input("Email", key="reset_email")
+        reset_pw = st.text_input("New password", type="password", key="reset_password")
+        reset_pw2 = st.text_input("Confirm new password", type="password", key="reset_password2")
+        if st.button("Set new password", key="reset_btn"):
+            em = (reset_email or "").strip().lower()
+            if not em or not reset_pw:
+                st.error("Enter email and a new password.")
+            elif reset_pw != reset_pw2:
+                st.error("Passwords do not match.")
+            elif len(reset_pw) < 6:
+                st.error("Password must be at least 6 characters.")
+            else:
+                try:
+                    if not user_exists(em):
+                        st.error("No account for that email. Use **Register** instead.")
+                    elif set_password(em, reset_pw):
+                        st.success("Password updated. Switch to **Login** and sign in.")
+                    else:
+                        st.error("Could not update password.")
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Reset failed (database error): {exc}")
+
     st.stop()
 
 email = st.session_state.email
 
 # ==================== APPLY PURCHASE ON RETURN ====================
-# Primary path for crediting the logged-in user (webhook is backup / async).
 qp = st.query_params
 if qp.get("checkout") == "success" and qp.get("session_id"):
     session_id = str(qp.get("session_id"))
@@ -87,16 +155,22 @@ if qp.get("checkout") == "success" and qp.get("session_id"):
                 "Register/login with the **same email** used at Stripe checkout, then reopen this success link."
             )
         else:
-            st.info(f"Payment received. Sync status: {detail}. Refresh in a few seconds if credits are not visible yet.")
+            st.info(
+                f"Payment received. Sync status: {detail}. "
+                "Refresh in a few seconds if credits are not visible yet."
+            )
     except (StripeConfigurationError, StripeTransientError, StripeCheckoutError) as exc:
         st.warning(f"Could not verify checkout with Stripe yet: {exc}")
 elif qp.get("checkout") == "success":
     st.success(
-        "Payment received. If credits do not appear within a minute, refresh this page "
-        "or ensure the Stripe webhook is pointed at the webhook service."
+        "Payment received. If credits do not appear within a minute, refresh this page."
     )
 
-user = get_user(email)
+try:
+    user = get_user(email)
+except Exception as exc:  # noqa: BLE001
+    st.error(f"Could not load your account: {exc}")
+    st.stop()
 
 with st.sidebar:
     st.write(f"Signed in as **{email}**")
@@ -161,7 +235,6 @@ if not user or (not user.get("subscription_active") and user.get("credits", 0) <
 
 st.success(f"Access granted — {email}")
 
-# ==================== MAIN TABS ====================
 tab_hash, tab_avalanche, tab_viz = st.tabs(
     ["Hash Computation", "Avalanche Effect", "539-Step Visualization"]
 )
