@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
-from config import data_dir, get as config_get
+from config import data_dir, get as config_get, is_master_email
 
 DB_FILENAME = "hqh539.db"
 
@@ -179,6 +179,7 @@ def verify_user(email: str, password: str) -> bool:
 
 def get_user(email: str) -> dict | None:
     email = email.strip().lower()
+    master = is_master_email(email)
     with _connect() as conn:
         c = conn.cursor()
         c.execute(
@@ -189,6 +190,8 @@ def get_user(email: str) -> dict | None:
         )
         row = c.fetchone()
         if not row:
+            # Master still has an identity for overrides even if the row is missing
+            # (they must still register/login for a session — verify_user needs a row).
             return None
 
         credits = int(row["credits"])
@@ -202,9 +205,38 @@ def get_user(email: str) -> dict | None:
 
         return {
             "credits": credits,
-            "subscription_active": active,
+            "subscription_active": active or master,
             "subscription_expires": expires,
+            "is_master": master,
+            "unlimited": master or active,
         }
+
+
+def list_users(limit: int = 100) -> list[dict]:
+    """Operator listing — email, credits, subscription flags."""
+    with _connect() as conn:
+        c = conn.cursor()
+        c.execute(
+            _q(
+                "SELECT email, credits, subscription_active, subscription_expires "
+                "FROM users ORDER BY email LIMIT ?"
+            ),
+            (int(limit),),
+        )
+        rows = c.fetchall()
+        out: list[dict] = []
+        for row in rows:
+            em = row["email"]
+            out.append(
+                {
+                    "email": em,
+                    "credits": int(row["credits"]),
+                    "subscription_active": bool(row["subscription_active"]),
+                    "subscription_expires": row["subscription_expires"],
+                    "is_master": is_master_email(em),
+                }
+            )
+        return out
 
 
 def bytes_per_credit() -> int:
@@ -250,14 +282,16 @@ def add_credits(email: str, amount: int) -> bool:
 
 
 def deduct_credits(email: str, amount: int) -> bool:
-    """Deduct `amount` credits (or allow free if Pro). Returns False if insufficient."""
+    """Deduct `amount` credits. Master and active Pro skip deduction."""
     if amount <= 0:
         return True
     email = email.strip().lower()
+    if is_master_email(email):
+        return True
     user = get_user(email)
     if not user:
         return False
-    if user["subscription_active"]:
+    if user.get("subscription_active") or user.get("unlimited"):
         return True
     if user["credits"] < amount:
         return False

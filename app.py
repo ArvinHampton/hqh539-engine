@@ -12,25 +12,27 @@ from billing import (
     create_subscription_checkout,
     is_live_mode,
 )
-from config import app_base_url
+from config import app_base_url, is_master_email, master_emails
 from database import (
+    activate_subscription,
+    add_credits,
     bytes_per_credit,
     create_user,
     credits_for_payload,
     deduct_credits,
     get_user,
     init_db,
+    list_users,
     set_password,
     user_exists,
     verify_user,
 )
 from hqh539 import hqh_539, ternary_step
 
-# Database must come after set_page_config; surface errors instead of a blank crash.
 try:
     init_db()
     _db_error = None
-except Exception as exc:  # noqa: BLE001 — show any DB failure in UI
+except Exception as exc:  # noqa: BLE001
     _db_error = str(exc)
 
 if "email" not in st.session_state:
@@ -138,6 +140,7 @@ if not st.session_state.email:
     st.stop()
 
 email = st.session_state.email
+master = is_master_email(email)
 
 # ==================== APPLY PURCHASE ON RETURN ====================
 qp = st.query_params
@@ -172,9 +175,18 @@ except Exception as exc:  # noqa: BLE001
     st.error(f"Could not load your account: {exc}")
     st.stop()
 
+# Master always has access even with 0 credits / missing sub flags
+has_access = bool(
+    master
+    or (user and (user.get("unlimited") or user.get("subscription_active") or user.get("credits", 0) > 0))
+)
+
 with st.sidebar:
     st.write(f"Signed in as **{email}**")
-    if user:
+    if master:
+        st.success("MASTER OPERATOR")
+        st.caption("Full overrides · no toll · admin panel unlocked")
+    elif user:
         if user.get("subscription_active"):
             st.success("Pro subscription active")
             if user.get("subscription_expires"):
@@ -187,8 +199,8 @@ with st.sidebar:
         st.session_state.email = None
         st.rerun()
 
-# ==================== PAYWALL ====================
-if not user or (not user.get("subscription_active") and user.get("credits", 0) <= 0):
+# ==================== PAYWALL (skipped for master) ====================
+if not has_access:
     st.warning("Choose how you want to access HQH-539:")
 
     col1, col2 = st.columns(2)
@@ -233,23 +245,35 @@ if not user or (not user.get("subscription_active") and user.get("credits", 0) <
     )
     st.stop()
 
-st.success(f"Access granted — {email}")
+if master:
+    st.success(f"Master access — {email}")
+else:
+    st.success(f"Access granted — {email}")
 
-tab_hash, tab_avalanche, tab_viz = st.tabs(
-    ["Hash Computation", "Avalanche Effect", "539-Step Visualization"]
-)
+tabs = ["Hash Computation", "Avalanche Effect", "539-Step Visualization"]
+if master:
+    tabs.append("Master overrides")
+
+tab_objs = st.tabs(tabs)
+tab_hash, tab_avalanche, tab_viz = tab_objs[0], tab_objs[1], tab_objs[2]
+tab_master = tab_objs[3] if master else None
 
 with tab_hash:
     msg = st.text_area("Input Message", "The universe counts in threes.")
-    cost = credits_for_payload(msg)
+    cost = 0 if master else credits_for_payload(msg)
     nbytes = len(msg.encode("utf-8"))
-    st.caption(f"Input size: {nbytes} bytes → **{cost} credit(s)** for this hash")
+    if master:
+        st.caption(f"Input size: {nbytes} bytes → **master override (0 credits)**")
+    else:
+        st.caption(f"Input size: {nbytes} bytes → **{cost} credit(s)** for this hash")
     if st.button("Compute HQH-539", type="primary"):
-        if deduct_credits(email, cost):
+        allowed = master or deduct_credits(email, cost)
+        if allowed:
             st.code(hqh_539(msg), language="text")
-            user = get_user(email)
-            if user and not user.get("subscription_active"):
-                st.caption(f"Charged {cost} credit(s). Remaining: {user.get('credits', 0)}")
+            if not master:
+                user = get_user(email)
+                if user and not user.get("subscription_active"):
+                    st.caption(f"Charged {cost} credit(s). Remaining: {user.get('credits', 0)}")
         else:
             st.warning(f"Need {cost} credit(s) for this payload (or an active Pro subscription).")
 
@@ -260,18 +284,23 @@ with tab_avalanche:
         orig = st.text_input("Original Message", "The universe counts in threes.")
     with col2:
         mod = st.text_input("Modified Message", "The universe counts in threez.")
-    cost_av = credits_for_payload(orig) + credits_for_payload(mod)
-    st.caption(f"Two hashes → **{cost_av} credit(s)** total")
+    cost_av = 0 if master else credits_for_payload(orig) + credits_for_payload(mod)
+    if master:
+        st.caption("Two hashes → **master override (0 credits)**")
+    else:
+        st.caption(f"Two hashes → **{cost_av} credit(s)** total")
     if st.button("Compare Hashes"):
-        if deduct_credits(email, cost_av):
+        charged = True if master else deduct_credits(email, cost_av)
+        if charged:
             h1 = hqh_539(orig)
             h2 = hqh_539(mod)
             diff = bin(int(h1, 16) ^ int(h2, 16)).count("1")
             st.metric("Bit Differences", f"{diff} / 512", f"{(diff / 512) * 100:.2f}% change")
             st.code(f"Original:  {h1}\nModified: {h2}", language="text")
-            user = get_user(email)
-            if user and not user.get("subscription_active"):
-                st.caption(f"Charged {cost_av} credit(s). Remaining: {user.get('credits', 0)}")
+            if not master:
+                user = get_user(email)
+                if user and not user.get("subscription_active"):
+                    st.caption(f"Charged {cost_av} credit(s). Remaining: {user.get('credits', 0)}")
         else:
             st.warning(f"Need {cost_av} credit(s) for this comparison.")
 
@@ -285,5 +314,66 @@ with tab_viz:
             sequence.append(float(n))
             n = ternary_step(n)
         st.line_chart(sequence)
+
+if tab_master is not None:
+    with tab_master:
+        st.subheader("Master operator overrides")
+        st.caption(
+            f"Master emails: {', '.join(sorted(master_emails()))}. "
+            "These accounts bypass paywall and data-volume tolling."
+        )
+
+        st.markdown("#### Grant credits to a user")
+        g_email = st.text_input("User email", key="master_grant_email")
+        g_amt = st.number_input("Credits to add", min_value=1, max_value=1_000_000, value=100, step=10)
+        if st.button("Grant credits", key="master_grant_btn"):
+            target = (g_email or "").strip().lower()
+            if not target or "@" not in target:
+                st.error("Enter a valid user email.")
+            elif not user_exists(target):
+                st.error("That user has not registered yet.")
+            elif add_credits(target, int(g_amt)):
+                st.success(f"Added {int(g_amt)} credits to {target}.")
+            else:
+                st.error("Grant failed.")
+
+        st.markdown("#### Activate Pro (30 days)")
+        s_email = st.text_input("User email for Pro", key="master_sub_email")
+        if st.button("Activate Pro subscription", key="master_sub_btn"):
+            target = (s_email or "").strip().lower()
+            if not target or "@" not in target:
+                st.error("Enter a valid user email.")
+            elif not user_exists(target):
+                st.error("That user has not registered yet.")
+            elif activate_subscription(target, days=30):
+                st.success(f"Pro activated for 30 days: {target}")
+            else:
+                st.error("Activation failed.")
+
+        st.markdown("#### Tolling override (session)")
+        st.caption(
+            "Master sessions never deduct credits. "
+            "Optional env `MASTER_EMAILS` adds more operator emails (comma-separated)."
+        )
+        if st.checkbox("Show computed toll for a sample payload", key="master_toll_preview"):
+            sample = st.text_area("Sample", "x" * 1000, key="master_toll_sample")
+            st.write(
+                {
+                    "bytes": len(sample.encode("utf-8")),
+                    "credits_if_customer": credits_for_payload(sample),
+                    "bytes_per_credit": bytes_per_credit(),
+                    "master_charge": 0,
+                }
+            )
+
+        st.markdown("#### Registered users")
+        try:
+            rows = list_users(200)
+            if rows:
+                st.dataframe(rows, use_container_width=True)
+            else:
+                st.info("No users registered yet.")
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not list users: {exc}")
 
 st.caption("539 Labs LLC • HQH-539 Resonant Hash Engine")

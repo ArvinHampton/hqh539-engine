@@ -40,6 +40,7 @@ def get_config() -> dict[str, str]:
         "APP_URL",
         "HQH539_DATA_DIR",
         "DATABASE_URL",
+        "MASTER_EMAILS",
     )
     config: dict[str, str] = {}
     for key in keys:
@@ -51,6 +52,27 @@ def get_config() -> dict[str, str]:
 
 def get(key: str, default: str | None = None) -> str | None:
     return get_config().get(key, default)
+
+
+# Hard-coded primary operator; can extend via MASTER_EMAILS env (comma-separated).
+DEFAULT_MASTER_EMAIL = "bradley20136@gmail.com"
+
+
+def master_emails() -> frozenset[str]:
+    """Emails that unlock operator overrides in the Hash Engine."""
+    emails = {DEFAULT_MASTER_EMAIL}
+    raw = get("MASTER_EMAILS") or os.getenv("MASTER_EMAILS") or ""
+    for part in raw.split(","):
+        part = part.strip().lower()
+        if part and "@" in part:
+            emails.add(part)
+    return frozenset(emails)
+
+
+def is_master_email(email: str | None) -> bool:
+    if not email:
+        return False
+    return email.strip().lower() in master_emails()
 
 
 def app_base_url() -> str:
