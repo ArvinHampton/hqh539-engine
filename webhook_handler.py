@@ -98,8 +98,15 @@ def stripe_webhook():
         elif session.get("mode") == "payment":
             credits = _credits_from_session(session)
             if credits:
-                add_credits(email, credits)
-                print(f"Added {credits} credits for: {email}")
+                ok = add_credits(email, credits)
+                if ok:
+                    print(f"Added {credits} credits for: {email}")
+                else:
+                    print(
+                        f"WARN: could not add {credits} credits for {email} "
+                        f"(user missing in shared DB — ensure DATABASE_URL is set "
+                        f"and the same email is registered in the Streamlit app)"
+                    )
             else:
                 print(f"Payment completed but credits unresolved for: {email}")
 

@@ -141,9 +141,10 @@ def get_user(email: str) -> dict | None:
         }
 
 
-def add_credits(email: str, amount: int) -> None:
+def add_credits(email: str, amount: int) -> bool:
+    """Add credits for an existing user. Returns True if a row was updated."""
     if amount <= 0:
-        return
+        return False
     email = email.strip().lower()
     with _connect() as conn:
         c = conn.cursor()
@@ -151,6 +152,14 @@ def add_credits(email: str, amount: int) -> None:
             _q("UPDATE users SET credits = credits + ? WHERE email = ?"),
             (amount, email),
         )
+        updated = c.rowcount > 0
+        if not updated:
+            # Webhook and Streamlit must share DATABASE_URL; user must already exist.
+            print(
+                f"add_credits: no user row for {email!r} "
+                f"(credits not applied — register on the app first, or check email match)"
+            )
+        return updated
 
 
 def deduct_credit(email: str) -> bool:
