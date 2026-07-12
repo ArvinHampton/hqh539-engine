@@ -185,6 +185,7 @@ elif qp.get("checkout") == "success":
         "Payment received. If credits do not appear within a minute, refresh this page."
     )
 
+user = None
 try:
     user = get_user(email)
 except Exception as exc:  # noqa: BLE001
@@ -194,7 +195,14 @@ except Exception as exc:  # noqa: BLE001
 # Master always has access even with 0 credits / missing sub flags
 has_access = bool(
     master
-    or (user and (user.get("unlimited") or user.get("subscription_active") or user.get("credits", 0) > 0))
+    or (
+        user is not None
+        and (
+            user.get("unlimited")
+            or user.get("subscription_active")
+            or user.get("credits", 0) > 0
+        )
+    )
 )
 
 with st.sidebar:
